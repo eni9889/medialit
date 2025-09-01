@@ -372,30 +372,40 @@ export async function completeChunkedUpload(
             tempFilePath: finalFilePath,
             mv: (destination: string, callback: (err?: any) => void) => {
                 // Since the file is already at finalFilePath, we need to move it to destination
-                rename(finalFilePath, destination, callback);
-            }
+                // Check if source file still exists before attempting to move
+                if (existsSync(finalFilePath)) {
+                    rename(finalFilePath, destination, callback);
+                } else {
+                    callback(new Error("Source file no longer exists"));
+                }
+            },
         };
 
-        // Upload using existing service
-        const mediaId = await mediaService.upload({
-            userId: chunkedUpload.userId.toString(),
-            apikey: chunkedUpload.apikey,
-            file: combinedFile,
-            access: chunkedUpload.access,
-            caption: chunkedUpload.caption,
-            group: chunkedUpload.group,
-            signature: chunkedUpload.signature,
-        });
+        let mediaId: string;
+        let media: any;
 
-        // Get media details
-        const media = await mediaService.getMediaDetails({
-            userId: chunkedUpload.userId.toString(),
-            apikey: chunkedUpload.apikey,
-            mediaId,
-        });
+        try {
+            // Upload using existing service
+            mediaId = await mediaService.upload({
+                userId: chunkedUpload.userId.toString(),
+                apikey: chunkedUpload.apikey,
+                file: combinedFile,
+                access: chunkedUpload.access,
+                caption: chunkedUpload.caption,
+                group: chunkedUpload.group,
+                signature: chunkedUpload.signature,
+            });
 
-        // Cleanup
-        await cleanupChunkedUpload(uploadId as string);
+            // Get media details
+            media = await mediaService.getMediaDetails({
+                userId: chunkedUpload.userId.toString(),
+                apikey: chunkedUpload.apikey,
+                mediaId,
+            });
+        } finally {
+            // Always cleanup chunked upload files, even if upload fails
+            await cleanupChunkedUpload(uploadId as string);
+        }
 
         if (chunkedUpload.signature) {
             presignedUrlService
@@ -474,12 +484,19 @@ async function cleanupChunkedUpload(uploadId: string) {
     try {
         const chunkedUpload = await ChunkedUploadModel.findOne({ uploadId });
         if (chunkedUpload) {
+            logger.info(`Starting cleanup for chunked upload ${uploadId}`);
+
             // Delete chunk files
+            let deletedChunks = 0;
             for (const chunk of chunkedUpload.chunks) {
                 if (existsSync(chunk.filePath)) {
                     require("fs").unlinkSync(chunk.filePath);
+                    deletedChunks++;
                 }
             }
+            logger.info(
+                `Deleted ${deletedChunks} chunk files for upload ${uploadId}`,
+            );
 
             // Delete chunk directory
             const chunkDir = join(tempFileDirForUploads || "/tmp", uploadId);
@@ -488,6 +505,9 @@ async function cleanupChunkedUpload(uploadId: string) {
                     recursive: true,
                     force: true,
                 });
+                logger.info(
+                    `Deleted chunk directory ${chunkDir} for upload ${uploadId}`,
+                );
             }
 
             // Delete final file if exists
@@ -498,11 +518,17 @@ async function cleanupChunkedUpload(uploadId: string) {
                 );
                 if (existsSync(finalFilePath)) {
                     require("fs").unlinkSync(finalFilePath);
+                    logger.info(
+                        `Deleted final file ${finalFilePath} for upload ${uploadId}`,
+                    );
                 }
             }
 
             // Delete database record
             await ChunkedUploadModel.deleteOne({ uploadId });
+            logger.info(`Completed cleanup for chunked upload ${uploadId}`);
+        } else {
+            logger.warn(`No chunked upload record found for ${uploadId}`);
         }
     } catch (err: any) {
         logger.error(

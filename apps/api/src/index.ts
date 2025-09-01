@@ -87,4 +87,29 @@ async function createAdminUser() {
     } catch (error) {
         logger.error({ error }, "Failed to create admin user");
     }
+
+    // Start periodic cleanup of expired chunked uploads
+    setInterval(
+        async () => {
+            try {
+                const ChunkedUploadModel = (
+                    await import("./media/chunked-upload-model")
+                ).default;
+                const result = await ChunkedUploadModel.deleteMany({
+                    expiresAt: { $lt: new Date() },
+                });
+                if (result.deletedCount > 0) {
+                    logger.info(
+                        `Cleaned up ${result.deletedCount} expired chunked upload records`,
+                    );
+                }
+            } catch (error) {
+                logger.error(
+                    { error },
+                    "Failed to cleanup expired chunked uploads",
+                );
+            }
+        },
+        60 * 60 * 1000,
+    ); // Run every hour
 }
